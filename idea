@@ -1,0 +1,4 @@
+the  overall design consist of primarily 3 nodes 1.traffic node 2.hub 3.vechicle each node has one esp32
+node 1. gets traffic density from ultra sonic sensors and calculates the best way to regulate traffic and produces output as red , yellow , green , the decision making is fair and red and blue lights turn on for ambulance 
+node 2 . hub controls the communication between vechicle node and traffic node ,the hub also keeps a log of vechicels and also intimates the traffic node for emergency
+node 3.vechicle node is also connected to mobile via bluetooth and uses the mobile gps to get the location (or) coordinates and the vechicle communicates with each other and also to the hub 
