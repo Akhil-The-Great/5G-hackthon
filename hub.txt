@@ -1,0 +1,169 @@
+//hub
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include <WebServer.h>
+
+/* ================= PACKET (MUST MATCH TRAFFIC NODE) ================= */
+typedef struct {
+  uint8_t mode;        // 0=AUTO, 1=MANUAL
+  uint8_t lane;        // 1–3
+  uint8_t emergency;   // 0/1
+  uint16_t d1, d2, d3; // distances from traffic node
+} Packet;
+
+/* ================= WIFI + SERVER ================= */
+WebServer server(80);
+IPAddress ip(192,168,4,1);
+IPAddress gw(192,168,4,1);
+IPAddress sn(255,255,255,0);
+
+/* ================= MAC ADDRESSES ================= */
+uint8_t TRAFFIC_MAC[] = {0x48,0xE7,0x29,0x98,0x75,0x7C};
+
+/* ================= GLOBAL DATA ================= */
+Packet trafficRX;     // received from traffic node
+Packet tx;            // sent to traffic node
+unsigned long lastTrafficSeen = 0;
+
+// Vehicle data
+String vehicleIP = "-";
+float vehicleLat = 0.0;
+float vehicleLon = 0.0;
+bool vehicleEmergency = false;
+unsigned long lastVehicleSeen = 0;
+
+/* ================= ESP-NOW RECEIVE ================= */
+void onReceive(const esp_now_recv_info_t *info,
+               const uint8_t *data, int len) {
+  memcpy(&trafficRX, data, sizeof(Packet));
+  lastTrafficSeen = millis();
+}
+
+/* ================= SEND TO TRAFFIC NODE ================= */
+void sendTrafficCmd() {
+  esp_now_send(TRAFFIC_MAC, (uint8_t*)&tx, sizeof(Packet));
+}
+
+/* ================= RECEIVE FROM VEHICLE ================= */
+void handleVehicle() {
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+
+    int ipi  = body.indexOf("\"ip\":\"");
+    int lati = body.indexOf("\"lat\":");
+    int loni = body.indexOf("\"lon\":");
+    int emi  = body.indexOf("\"emergency\":");
+
+    if (ipi != -1)
+      vehicleIP = body.substring(ipi + 6, body.indexOf("\"", ipi + 6));
+
+    if (lati != -1)
+      vehicleLat = body.substring(lati + 6).toFloat();
+
+    if (loni != -1)
+      vehicleLon = body.substring(loni + 6).toFloat();
+
+    if (emi != -1) {
+      vehicleEmergency = body.substring(emi + 12).toInt();
+      tx.emergency = vehicleEmergency;
+      sendTrafficCmd();
+    }
+
+    lastVehicleSeen = millis();
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+/* ================= JSON FOR WEB PAGE ================= */
+void handleData() {
+  bool trafficOnline = (millis() - lastTrafficSeen) < 5000;
+  bool vehicleOnline = (millis() - lastVehicleSeen) < 5000;
+
+  String j = "{";
+  j += "\"traffic\":" + String(trafficOnline ? "true" : "false") + ",";
+  j += "\"vehicle\":" + String(vehicleOnline ? "true" : "false") + ",";
+  j += "\"ip\":\"" + vehicleIP + "\",";
+  j += "\"lat\":" + String(vehicleLat,6) + ",";
+  j += "\"lon\":" + String(vehicleLon,6) + ",";
+  j += "\"emg\":" + String(vehicleEmergency) + ",";
+  j += "\"d1\":" + String(trafficRX.d1) + ",";
+  j += "\"d2\":" + String(trafficRX.d2) + ",";
+  j += "\"d3\":" + String(trafficRX.d3);
+  j += "}";
+
+  server.send(200, "application/json", j);
+}
+
+/* ================= WEB PAGE ================= */
+void handleRoot() {
+  String p = "";
+  p += "<h1>🚦 Smart Traffic Hub</h1>";
+  p += "<p>Traffic Node: <b id='tn'></b></p>";
+  p += "<p>Vehicle: <b id='vn'></b></p>";
+  p += "<p>Vehicle IP: <span id='ip'></span></p>";
+  p += "<p>Latitude: <span id='lat'></span></p>";
+  p += "<p>Longitude: <span id='lon'></span></p>";
+  p += "<p>Emergency: <span id='emg'></span></p>";
+  p += "<p>D1: <span id='d1'></span> cm</p>";
+  p += "<p>D2: <span id='d2'></span> cm</p>";
+  p += "<p>D3: <span id='d3'></span> cm</p>";
+
+  p += "<button onclick=\"cmd('/l1')\">Lane 1</button>";
+  p += "<button onclick=\"cmd('/l2')\">Lane 2</button>";
+  p += "<button onclick=\"cmd('/l3')\">Lane 3</button><br>";
+  p += "<button onclick=\"cmd('/auto')\">AUTO</button>";
+  p += "<button onclick=\"cmd('/emg_on')\">🚨 EMERGENCY ON</button>";
+  p += "<button onclick=\"cmd('/emg_off')\">EMERGENCY OFF</button>";
+
+  p += "<script>";
+  p += "function u(){fetch('/data').then(r=>r.json()).then(d=>{";
+  p += "tn.innerText=d.traffic?'ONLINE':'OFFLINE';";
+  p += "vn.innerText=d.vehicle?'ONLINE':'OFFLINE';";
+  p += "ip.innerText=d.ip;lat.innerText=d.lat;lon.innerText=d.lon;";
+  p += "emg.innerText=d.emg?'YES':'NO';";
+  p += "d1.innerText=d.d1;d2.innerText=d.d2;d3.innerText=d.d3;";
+  p += "});}";
+  p += "function cmd(u){fetch(u);}setInterval(u,1000);u();";
+  p += "</script>";
+
+  server.send(200, "text/html", p);
+}
+
+/* ================= SETUP ================= */
+void setup() {
+  Serial.begin(115200);
+
+  WiFi.softAPConfig(ip, gw, sn);
+  WiFi.softAP("TrafficHub", "12345678");
+  WiFi.mode(WIFI_AP_STA);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+
+  esp_now_init();
+  esp_now_register_recv_cb(onReceive);
+
+  esp_now_peer_info_t peer{};
+  memcpy(peer.peer_addr, TRAFFIC_MAC, 6);
+  peer.channel = 1;
+  peer.encrypt = false;
+  esp_now_add_peer(&peer);
+
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.on("/vehicle", HTTP_POST, handleVehicle);
+
+  server.on("/l1", [](){ tx.mode=1; tx.lane=1; tx.emergency=0; sendTrafficCmd(); });
+  server.on("/l2", [](){ tx.mode=1; tx.lane=2; tx.emergency=0; sendTrafficCmd(); });
+  server.on("/l3", [](){ tx.mode=1; tx.lane=3; tx.emergency=0; sendTrafficCmd(); });
+  server.on("/auto", [](){ tx.mode=0; tx.emergency=0; sendTrafficCmd(); });
+  server.on("/emg_on", [](){ tx.emergency=1; sendTrafficCmd(); });
+  server.on("/emg_off", [](){ tx.emergency=0; sendTrafficCmd(); });
+
+  server.begin();
+  Serial.println("🌐 Hub READY @ http://192.168.4.1");
+}
+
+/* ================= LOOP ================= */
+void loop() {
+  server.handleClient();
+}

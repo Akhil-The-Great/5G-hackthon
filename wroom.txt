@@ -1,0 +1,150 @@
+//wroom
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+
+// ===== HUB STA MAC =====
+uint8_t HUB_MAC[] = {0x28,0x56,0x2F,0x73,0x06,0x98};
+
+// Ultrasonic pins
+int trigPin[3] = {13,16,17};
+int echoPin[3] = {14,18,19};
+
+// RGB LEDs (COMMON ANODE → LOW = ON)
+int redPin[3]    = {21,27,4};
+int greenPin[3]  = {22,33,0};
+int yellowPin[3] = {23,32,2};
+
+// ===== SHARED PACKET =====
+typedef struct {
+  uint8_t mode;        // 0=AUTO, 1=MANUAL
+  uint8_t lane;        // 1–3
+  uint8_t emergency;   // 0=OFF, 1=ON
+  uint16_t d1,d2,d3;   // distances
+} Packet;
+
+Packet rx, tx;
+
+bool manualMode = false;
+int manualLane  = -1;
+
+// -------- Ultrasonic ----------
+long getDistance(int t,int e){
+  digitalWrite(t,LOW); delayMicroseconds(2);
+  digitalWrite(t,HIGH); delayMicroseconds(10);
+  digitalWrite(t,LOW);
+  long d = pulseIn(e,HIGH,30000);
+  if(d == 0) return 200;
+  return d * 0.034 / 2;
+}
+
+// -------- LED Control ---------
+void allRed(){
+  for(int i=0;i<3;i++){
+    digitalWrite(redPin[i],LOW);
+    digitalWrite(greenPin[i],HIGH);
+    digitalWrite(yellowPin[i],HIGH);
+  }
+}
+
+void setGreen(int lane){
+  allRed();
+  digitalWrite(redPin[lane],HIGH);
+  digitalWrite(greenPin[lane],LOW);
+}
+
+void emergencyAllOn(){
+  for(int i=0;i<3;i++){
+    digitalWrite(redPin[i],LOW);
+    digitalWrite(greenPin[i],LOW);
+    digitalWrite(yellowPin[i],LOW);
+  }
+}
+
+// -------- ESP-NOW RX ----------
+void onReceive(const esp_now_recv_info_t *info,
+               const uint8_t *data,int len){
+  memcpy(&rx, data, sizeof(rx));
+
+  // 🚨 Emergency overrides everything
+  if(rx.emergency == 1){
+    manualMode = false;
+    return;
+  }
+
+  // Manual mode
+  if(rx.mode == 1){
+    manualMode = true;
+    manualLane = rx.lane - 1;
+  } else {
+    manualMode = false;
+  }
+}
+
+void setup(){
+  Serial.begin(115200);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true,true);
+  delay(100);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+
+  esp_now_init();
+  esp_now_register_recv_cb(onReceive);
+
+  esp_now_peer_info_t peer{};
+  memcpy(peer.peer_addr, HUB_MAC, 6);
+  peer.channel = 1;
+  peer.encrypt = false;
+  esp_now_add_peer(&peer);
+
+  for(int i=0;i<3;i++){
+    pinMode(trigPin[i],OUTPUT);
+    pinMode(echoPin[i],INPUT);
+    pinMode(redPin[i],OUTPUT);
+    pinMode(greenPin[i],OUTPUT);
+    pinMode(yellowPin[i],OUTPUT);
+  }
+
+  allRed();
+  Serial.println("🚦 Traffic Node READY");
+}
+
+void loop(){
+
+  // 🚨 EMERGENCY MODE
+  if(rx.emergency == 1){
+    emergencyAllOn();
+    delay(300);
+    return;
+  }
+
+  // 🧑 MANUAL MODE
+  if(manualMode){
+    setGreen(manualLane);
+    delay(300);
+    return;
+  }
+
+  // 🚗 AUTO MODE
+  long d[3];
+  for(int i=0;i<3;i++)
+    d[i] = getDistance(trigPin[i], echoPin[i]);
+
+  int best = 0;
+  for(int i=1;i<3;i++)
+    if(d[i] < d[best]) best = i;
+
+  setGreen(best);
+
+  // Send data to hub
+  tx.mode = 0;
+  tx.lane = best + 1;
+  tx.emergency = 0;
+  tx.d1 = d[0];
+  tx.d2 = d[1];
+  tx.d3 = d[2];
+
+  esp_now_send(HUB_MAC, (uint8_t*)&tx, sizeof(tx));
+  delay(2000);
+}

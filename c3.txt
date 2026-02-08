@@ -1,0 +1,88 @@
+//c3
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+
+const char* HUB_SSID = "TrafficHub";
+const char* HUB_PASS = "12345678";
+const char* HUB_URL  = "http://192.168.4.1/vehicle";
+
+WebServer server(80);
+
+float lat = 0.0, lon = 0.0;
+bool emergency = false;
+
+void sendToHub() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(HUB_URL);
+  http.addHeader("Content-Type", "application/json");
+
+  String payload = "{";
+  payload += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  payload += "\"lat\":" + String(lat,6) + ",";
+  payload += "\"lon\":" + String(lon,6) + ",";
+  payload += "\"emergency\":" + String(emergency);
+  payload += "}";
+
+  http.POST(payload);
+  http.end();
+}
+
+void handleGPS() {
+  lat = server.arg("lat").toFloat();
+  lon = server.arg("lon").toFloat();
+  sendToHub();
+  server.send(200, "text/plain", "OK");
+}
+
+void handleRoot() {
+  String p="";
+  p += "<h1>🚑 Vehicle Node</h1>";
+  p += "<p>Lat: <span id='la'></span></p>";
+  p += "<p>Lon: <span id='lo'></span></p>";
+  p += "<button onclick=\"fetch('/on')\">🚨 EMG ON</button>";
+  p += "<button onclick=\"fetch('/off')\">EMG OFF</button>";
+  p += "<script>";
+  p += "function gps(){navigator.geolocation.getCurrentPosition(p=>{";
+  p += "fetch(`/gps?lat=${p.coords.latitude}&lon=${p.coords.longitude}`);";
+  p += "la.innerText=p.coords.latitude;";
+  p += "lo.innerText=p.coords.longitude;";
+  p += "});}";
+  p += "setInterval(gps,3000);gps();";
+  p += "</script>";
+  server.send(200,"text/html",p);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // ✅ VERIFIED WORKING WIFI INIT
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(200);
+  WiFi.begin(HUB_SSID, HUB_PASS);
+
+  Serial.print("C3 connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\n✅ C3 CONNECTED");
+  Serial.print("C3 IP: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", handleRoot);
+  server.on("/gps", handleGPS);
+  server.on("/on", [](){ emergency = true; sendToHub(); server.send(200); });
+  server.on("/off", [](){ emergency = false; sendToHub(); server.send(200); });
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
